@@ -1,319 +1,112 @@
-#!/usr/bin/env python3
-"""
-Interactive setup script for Job Hunter skill configuration.
-
-Creates the config file at ~/.config/job-hunter/config.json
-
-Usage:
-    python setup_config.py
-    python setup_config.py --validate  # Just validate existing config
-"""
-
+"""Staged local onboarding. AI recommends; the user confirms each stage."""
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
+from common.job_scoring import load_resume_text, contains
 
-CONFIG_DIR = Path.home() / ".config" / "job-hunter"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+def strings(value):
+    return isinstance(value, list) and bool(value) and all(isinstance(s, str) and s.strip() for s in value)
 
-DEFAULT_CONFIG = {
-    "jsearch_api_key": "",
-    "search_provider": "jobspy",
-    "resume_path": "",
-    "obsidian_vault": "",
-    "user_name": "",
-    "min_score": 70,
-    "search": {
-        "keywords": [],
-        "location": "",
-        "remote": True,
-        "time_range": "week",
-        "max_results_per_query": 20,
-        # glassdoor removed: upstream JobSpy 400 errors; builtin/wellfound
-        # were never supported by JobSpy and silently did nothing
-        "job_domains": ["linkedin.com", "indeed.com"],
-        # LinkedIn anti-rate-limit knobs (JobSpy provider only):
-        "linkedin_fetch_description": True,   # set False if you hit 429s
-        "request_delay": 3,                   # seconds between JobSpy calls
-        "proxies": [],                        # e.g. ["user:pass@host:port"]
-        "user_agent": "",                     # override if LinkedIn blocks default UA
-        "country_indeed": "USA"
-    }
-}
+def validate_profile(plan, cv):
+    if not strings(plan.get('keywords')):
+        raise ValueError('keywords must be a nonempty string list')
+    p = plan.get('scoring', {})
+    if not strings(p.get('title_terms')) or not isinstance(p.get('skills'), list) or not p['skills']:
+        raise ValueError('scoring needs title_terms and skills')
+    for s in p['skills']:
+        if not isinstance(s.get('label'), str) or not s['label'].strip() or not strings(s.get('terms')):
+            raise ValueError('Each skill needs label and terms')
+        if type(s.get('weight')) not in (int, float) or not 0 < s['weight'] <= 10:
+            raise ValueError('Skill weight must be in (0, 10]')
+        if not isinstance(s.get('evidence'), str) or not s['evidence'].strip() or not contains(s['evidence'], cv):
+            raise ValueError('Every skill needs an exact evidence excerpt from the CV')
+    for key in ('required_any', 'excluded_title_terms'):
+        if key in p and p[key] != [] and not strings(p[key]):
+            raise ValueError(f'{key} must be a string list')
+    if type(p.get('min_score', 55)) is not int or not 0 <= p.get('min_score', 55) <= 100:
+        raise ValueError('min_score must be an integer from 0 to 100')
 
+def validate_config(c):
+    cv = load_resume_text(c['resume_path'])
+    if not cv.strip():
+        raise ValueError('CV has no text; OCR scanned PDFs first')
+    validate_profile({'keywords': c['search']['keywords'], 'scoring': c['scoring']}, cv)
+    if c.get('onboarding', {}).get('stage') != 'ready':
+        raise ValueError('Confirm countries before searching')
+    if not strings(c.get('preferred_countries')) or not c.get('html_tracker'):
+        raise ValueError('Missing countries or html_tracker')
 
-def prompt(message: str, default: str = "", required: bool = False, secret: bool = False) -> str:
-    """Prompt user for input."""
-    if default:
-        message = f"{message} [{default}]: "
-    else:
-        message = f"{message}: "
-
-    while True:
-        if secret:
-            import getpass
-            value = getpass.getpass(message)
-        else:
-            value = input(message).strip()
-
-        if not value:
-            value = default
-
-        if required and not value:
-            print("This field is required.")
-            continue
-
-        return value
-
-
-def prompt_list(message: str, default: list | None = None) -> list:
-    """Prompt user for comma-separated list."""
-    default = default or []
-    default_str = ", ".join(default) if default else ""
-
-    print(f"{message}")
-    value = prompt("Enter comma-separated values", default=default_str)
-
-    if not value:
-        return default
-
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def validate_config(config: dict) -> list[str]:
-    """Validate configuration and return list of errors."""
-    errors = []
-
-    provider = config.get("search_provider", "jobspy")
-    if provider == "jsearch" and not config.get("jsearch_api_key"):
-        errors.append("Missing JSearch API key (search_provider is 'jsearch')")
-    # jobspy requires no API key
-
-    if not config.get("resume_path"):
-        errors.append("Missing resume path")
-    elif not Path(config["resume_path"]).expanduser().exists():
-        errors.append(f"Resume file not found: {config['resume_path']}")
-
-    if not config.get("obsidian_vault"):
-        errors.append("Missing Obsidian vault path")
-    elif not Path(config["obsidian_vault"]).expanduser().exists():
-        errors.append(f"Obsidian vault not found: {config['obsidian_vault']}")
-
-    search = config.get("search", {})
-    if not search.get("keywords"):
-        errors.append("Need at least one search keyword configured")
-
-    return errors
-
-
-def load_existing_config() -> dict:
-    """Load existing config or return default."""
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE) as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            print("Warning: Existing config is invalid, starting fresh.")
-
-    return DEFAULT_CONFIG.copy()
-
-
-def save_config(config: dict) -> None:
-    """Save config to file."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
-
-    # Set restrictive permissions (contains API keys)
-    os.chmod(CONFIG_FILE, 0o600)
-
-    print(f"\nConfiguration saved to: {CONFIG_FILE}")
-
-
-def setup_interactive() -> dict:
-    """Run interactive setup."""
-    print("=" * 50)
-    print("Job Hunter Configuration Setup")
-    print("=" * 50)
-    print()
-
-    config = load_existing_config()
-
-    # Search provider
-    print("1. SEARCH PROVIDER")
-    print("-" * 30)
-    print("  jobspy  - No API key needed. Uses LinkedIn's public guest API. (Recommended)")
-    print("  jsearch - RapidAPI. 200 free requests/month. Google Jobs aggregator.")
-    config["search_provider"] = prompt(
-        "Search provider (jobspy/jsearch)",
-        default=config.get("search_provider", "jobspy")
-    ).lower()
-    print()
-
-    if config["search_provider"] == "jsearch":
-        print("1a. JSEARCH CONFIGURATION")
-        print("-" * 30)
-        print("Get your API key from: https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch")
-        existing_key = config.get("jsearch_api_key", "")
-        new_key = prompt(
-            "JSearch (RapidAPI) API key",
-            default="***" if existing_key else "",
-            required=not existing_key,
-            secret=True,
-        )
-        if new_key and new_key != "***":
-            config["jsearch_api_key"] = new_key
-        elif not existing_key:
-            config["jsearch_api_key"] = new_key  # required path; prompt loop ensures non-empty
-    else:
-        print("1a. JOBSPY — no API key required.")
-    print()
-
-    # User Name
-    print("2. USER INFO")
-    print("-" * 30)
-    config["user_name"] = prompt(
-        "Your full name (for cover letters)",
-        default=config.get("user_name", ""),
-        required=True
-    )
-    print()
-
-    # Resume Path
-    print("3. RESUME CONFIGURATION")
-    print("-" * 30)
-    config["resume_path"] = prompt(
-        "Path to your resume (PDF or text)",
-        default=config.get("resume_path", ""),
-        required=True
-    )
-    print()
-
-    # Obsidian Vault
-    print("4. OBSIDIAN CONFIGURATION")
-    print("-" * 30)
-    config["obsidian_vault"] = prompt(
-        "Obsidian vault path for job tracking",
-        default=config.get("obsidian_vault", "~/Documents/Obsidian Vault/job-hunter")
-    )
-    print()
-
-    # Search Configuration
-    print("5. JOB SEARCH CONFIGURATION")
-    print("-" * 30)
-
-    search_config = config.get("search", DEFAULT_CONFIG["search"].copy())
-
-    search_config["keywords"] = prompt_list(
-        "Job search keywords (e.g., 'machine learning engineer, data scientist')",
-        default=search_config.get("keywords", [])
-    )
-
-    search_config["location"] = prompt(
-        "Location (e.g., 'Boston, MA')",
-        default=search_config.get("location", "")
-    )
-
-    remote_input = prompt(
-        "Include remote jobs? (yes/no)",
-        default="yes" if search_config.get("remote", True) else "no"
-    )
-    search_config["remote"] = remote_input.lower() in ("yes", "y", "true", "1")
-
-    _provider = config.get("search_provider", "jobspy")
-    if _provider == "jsearch":
-        max_cap, cap_note = 10, "  ← 10/request; each keyword uses 1 request"
-    else:
-        max_cap, cap_note = 20, "  ← LinkedIn rate-limits at ~100 results/IP"
-    max_results = prompt(
-        f"Max results per query (1-{max_cap}){cap_note}",
-        default=str(search_config.get("max_results_per_query", max_cap))
-    )
-    search_config["max_results_per_query"] = min(max_cap, int(max_results)) if max_results.isdigit() else max_cap
-
-    search_config["time_range"] = prompt(
-        "Time range for job postings (day/week/month)",
-        default=search_config.get("time_range", "week")
-    )
-
-    config["search"] = search_config
-    print()
-
-    # Remove legacy fields if present
-    for key in ["apify_api_key", "linkedin_search_url", "indeed_search_url", "email",
-                "tavily_api_key", "exa_api_key"]:
-        config.pop(key, None)
-
-    return config
-
+def save(path, config):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix('.tmp')
+    with temp.open('w', encoding='utf-8') as f:
+        if os.name != 'nt':
+            os.chmod(temp, 0o600)
+        json.dump(config, f, ensure_ascii=False, indent=2)
+    temp.replace(path)
 
 def main():
-    parser = argparse.ArgumentParser(description="Setup Job Hunter configuration")
-    parser.add_argument("--validate", action="store_true",
-                        help="Only validate existing configuration")
-    parser.add_argument("--show", action="store_true",
-                        help="Show current configuration (masks secrets)")
-
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', default='~/.config/job-hunter/config.json')
+    commands = parser.add_subparsers(dest='command', required=True)
+    scan = commands.add_parser('scan')
+    scan.add_argument('--resume', required=True)
+    profile = commands.add_parser('profile')
+    profile.add_argument('--resume', required=True)
+    profile.add_argument('--proposal', required=True)
+    profile.add_argument('--confirmed', action='store_true', required=True)
+    countries = commands.add_parser('countries')
+    countries.add_argument('--countries', nargs='+', required=True)
+    countries.add_argument('--tracker', required=True)
+    countries.add_argument('--confirmed', action='store_true', required=True)
+    commands.add_parser('validate')
     args = parser.parse_args()
-
-    if args.validate:
-        if not CONFIG_FILE.exists():
-            print(f"No config file found at {CONFIG_FILE}")
-            sys.exit(1)
-
-        config = load_existing_config()
-        errors = validate_config(config)
-
-        if errors:
-            print("Configuration errors:")
-            for error in errors:
-                print(f"  - {error}")
-            sys.exit(1)
-        else:
-            print("Configuration is valid!")
-            sys.exit(0)
-
-    if args.show:
-        if not CONFIG_FILE.exists():
-            print(f"No config file found at {CONFIG_FILE}")
-            sys.exit(1)
-
-        config = load_existing_config()
-
-        display_config = json.loads(json.dumps(config))
-        if display_config.get("jsearch_api_key"):
-            display_config["jsearch_api_key"] = display_config["jsearch_api_key"][:10] + "..."
-        search = display_config.get("search", {})
-        if search.get("proxies"):
-            search["proxies"] = ["***" if p else p for p in search["proxies"]]
-
-        print(json.dumps(display_config, indent=2))
-        sys.exit(0)
-
+    path = Path(args.config).expanduser().resolve()
     try:
-        config = setup_interactive()
-
-        errors = validate_config(config)
-        if errors:
-            print("\nConfiguration warnings:")
-            for error in errors:
-                print(f"  - {error}")
-            print("\nYou can fix these later by running setup again.")
-
-        save = prompt("Save configuration? (yes/no)", default="yes")
-        if save.lower() in ("yes", "y"):
-            save_config(config)
-            print("\nSetup complete! Run /job-hunt to start hunting.")
+        if args.command == 'scan':
+            text = load_resume_text(args.resume)
+            if not text.strip():
+                raise ValueError('CV has no text; OCR scanned PDFs first')
+            print(text)
+            return
+        c = json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
+        if args.command == 'profile':
+            cv = load_resume_text(args.resume)
+            plan = json.loads(Path(args.proposal).expanduser().read_text(encoding='utf-8-sig'))
+            validate_profile(plan, cv)
+            c['resume_path'] = str(Path(args.resume).expanduser().resolve())
+            c['scoring'] = plan['scoring']
+            c.setdefault('search', {})['keywords'] = plan['keywords']
+            for k, v in dict(time_range='week', remote=False, max_results_per_query=20,
+                             job_domains=['linkedin.com', 'indeed.com']).items():
+                c['search'].setdefault(k, v)
+            c['onboarding'] = {'stage': 'countries_pending'}
+            save(path, c)
+            print('Keywords saved. Present countries and obtain user confirmation next.')
+        elif args.command == 'countries':
+            if c.get('onboarding', {}).get('stage') not in ('countries_pending', 'ready'):
+                raise ValueError('Confirm CV keyword proposal first')
+            from jobspy_scraper import LOCATION_TO_COUNTRY_INDEED
+            names = {n.casefold(): n.title() for n in LOCATION_TO_COUNTRY_INDEED}
+            selected = []
+            for name in args.countries:
+                if name.casefold() not in names:
+                    raise ValueError(f'Country not mapped: {name}. Choose from documented country list.')
+                if names[name.casefold()] not in selected:
+                    selected.append(names[name.casefold()])
+            c['preferred_countries'] = selected
+            c['html_tracker'] = str(Path(args.tracker).expanduser().resolve())
+            c['search']['location'] = selected[0]
+            c['onboarding'] = {'stage': 'ready'}
+            validate_config(c)
+            save(path, c)
+            print(f'Ready. Configuration: {path}')
         else:
-            print("\nConfiguration not saved.")
+            validate_config(c)
+            print('Configuration valid')
+    except (ValueError, KeyError, OSError, TypeError) as exc:
+        parser.error(str(exc))
 
-    except KeyboardInterrupt:
-        print("\n\nSetup cancelled.")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

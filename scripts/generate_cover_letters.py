@@ -150,15 +150,14 @@ def main():
     if args.output_dir:
         output_base = Path(args.output_dir).expanduser()
     else:
-        vault_path = config.get('obsidian_vault', '~/Documents/Obsidian Vault/job-hunter')
-        output_base = Path(vault_path).expanduser() / 'Cover Letters'
+        output_base = Path(config['html_tracker']).expanduser().parent / 'Cover Letters'
 
     # Create dated subfolder for this run
     today = datetime.now().strftime('%Y-%m-%d')
     output_dir = output_base / today
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(Path(args.jobs).expanduser()) as f:
+    with open(Path(args.jobs).expanduser(), encoding="utf-8-sig") as f:
         jobs = json.load(f)
 
     if args.indices:
@@ -177,12 +176,12 @@ def main():
 
         cover_letter = generate_cover_letter(job, config)
 
-        safe_company = company.replace('/', '_').replace(':', '_').replace('|', '_')[:50]
-        safe_title = title.replace('/', '_').replace(':', '_').replace('|', '_')[:40]
+        safe_company = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', company)[:50].rstrip('. ')
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title)[:40].rstrip('. ')
         filename = f"{safe_company} - {safe_title}.md"
 
         output_file = output_dir / filename
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write(cover_letter)
 
         print(f"  {i}. {filename}")

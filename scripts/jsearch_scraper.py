@@ -5,14 +5,7 @@ JSearch Job Scraper - Searches jobs via JSearch API on RapidAPI.
 JSearch aggregates Google Jobs data, which includes postings from LinkedIn,
 Indeed, Glassdoor, and hundreds of company career pages — all in one call.
 
-Advantages:
-- Full job descriptions (no auth wall issues)
-- 200 free requests/month on the Basic plan
-- Covers LinkedIn postings without hitting LinkedIn directly
-
-Pricing (RapidAPI):
-- Basic: 200 requests/month free
-- Pro: $10/month for 3,000 requests
+Optional provider. Check your own RapidAPI plan for current prices and quotas.
 
 Usage:
     python jsearch_scraper.py --config ~/.config/job-hunter/config.json
@@ -107,6 +100,10 @@ def normalize_jsearch_result(job: dict) -> dict:
     return result
 
 
+class QuotaExceeded(Exception):
+    """JSearch monthly quota used up; every further call would also fail."""
+
+
 def search_jobs(
     api_key: str,
     query: str,
@@ -137,19 +134,18 @@ def search_jobs(
             params["page"] = str(page)
             try:
                 resp = client.get(JSEARCH_URL, headers=headers, params=params)
+                if resp.status_code == 429 and "quota" in resp.text.lower():
+                    raise QuotaExceeded(resp.text[:200])
                 if resp.status_code != 200:
-                    print(
-                        f"  JSearch API error {resp.status_code}: {resp.text[:200]}",
-                        file=sys.stderr,
-                    )
-                    break
+                    raise RuntimeError(f'JSearch HTTP {resp.status_code}')
                 data = resp.json().get("data") or []
                 all_data.extend(data)
                 if len(data) < 10:
                     break  # no more results
+            except QuotaExceeded:
+                raise
             except Exception as e:
-                print(f"  JSearch request error: {e}", file=sys.stderr)
-                break
+                raise RuntimeError('JSearch request failed; successful-run state unchanged') from e
 
     return all_data[:num_results]
 
@@ -169,32 +165,48 @@ def scrape_jobs(
         sys.exit(1)
 
     search_config = config.get("search", {})
-    keywords_list = keywords or search_config.get("keywords", [])
+    # Separate, shorter keyword list for JSearch: every keyword costs one API call per country
+    keywords_list = keywords or search_config.get("jsearch_keywords") or search_config.get("keywords", [])
     loc = location or search_config.get("location", "")
     time_range = search_config.get("time_range", "week")
     date_posted = TIME_RANGE_TO_DATE_POSTED.get(time_range, "week")
     num_results = search_config.get("max_results_per_query", 10)
     remote = bool(search_config.get("remote"))
 
-    print(f"Date posted filter: {date_posted} | Results/keyword: {num_results}")
+    # Countries to search: explicit --location override > preferred_countries config > no filter
+    if location:
+        countries = [location]
+    else:
+        countries = config.get("preferred_countries", [])
+
+    print(f"Date posted filter: {date_posted} | Results/keyword: {num_results} | Countries: {len(countries) or 'global'}")
 
     all_jobs = []
     for kw in keywords_list:
-        query = f"{kw} {loc}".strip() if loc else kw
-        if remote and "remote" not in query.lower():
-            query = f"{query} remote"
-        print(f"Searching: {query}")
-        raw = search_jobs(api_key, query, num_results, date_posted, remote_only=remote)
-        normalized = [normalize_jsearch_result(r) for r in raw]
-        all_jobs.extend(normalized)
-        print(f"  Found {len(normalized)} postings")
+        search_targets = countries if countries else [None]
+        for country in search_targets:
+            query = f"{kw} {country}".strip() if country else kw
+            if remote and "remote" not in query.lower():
+                query = f"{query} remote"
+            print(f"Searching: {query}")
+            try:
+                raw = search_jobs(api_key, query, num_results, date_posted, remote_only=remote)
+            except QuotaExceeded as e:
+                # Exit non-zero so the pipeline doesn't record this as a completed JSearch run
+                print(f"  JSearch quota exhausted, stopping: {e}", file=sys.stderr)
+                sys.exit(2)
+            normalized = [normalize_jsearch_result(r) for r in raw]
+            all_jobs.extend(normalized)
+            print(f"  Found {len(normalized)} postings")
 
     # Deduplicate across keywords
     all_jobs = deduplicate_jobs(all_jobs)
 
-    # Filter previously seen jobs
-    if skip_seen and config.get("obsidian_vault"):
-        all_jobs = filter_seen_jobs(all_jobs, config["obsidian_vault"])
+    # Filter previously seen jobs (HTML tracker takes priority over legacy Obsidian vault)
+    if skip_seen:
+        html_tracker = config.get("html_tracker")
+        obsidian_vault = config.get("obsidian_vault") if not html_tracker else None
+        all_jobs = filter_seen_jobs(all_jobs, obsidian_vault, html_tracker)
 
     # Sort by posted date (newest first)
     all_jobs.sort(key=lambda j: j.get("posted_date", ""), reverse=True)

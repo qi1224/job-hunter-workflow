@@ -1,19 +1,16 @@
-# macOS metadata
-.DS_Store
-
-# User config (contains API keys and personal paths)
-config.json
-**/config.local.json
-*.local.json
-
-# Python
-__pycache__/
-*.pyc
 .venv/
+__pycache__/
+*.py[cod]
 *.egg-info/
-
-# Logs
+.DS_Store
+.env
+.env.*
+config.json
+proposal.json
 *.log
-
-# Claude local settings
-.claude/
+.job-hunter-*
+private/
+output/
+JD Reports/
+Cover Letters/
+Job Tracker.html

@@ -15,7 +15,7 @@ def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
         print("Run setup_config.py to create configuration.", file=sys.stderr)
         sys.exit(1)
 
-    with open(path) as f:
+    with open(path, encoding="utf-8-sig") as f:
         return json.load(f)
 
 

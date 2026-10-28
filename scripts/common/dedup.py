@@ -22,38 +22,30 @@ def _normalize_title(title: str) -> str:
 def deduplicate_jobs(jobs: list[dict]) -> list[dict]:
     """Remove duplicate jobs.
 
-    Pass 1: deduplicate by URL (exact). Jobs without a URL are kept
-            and handled by pass 2.
-    Pass 2: deduplicate by normalized (title, company) pair, keeping the
-            best source (linkedin > indeed > glassdoor > other).
-            Title alone is NOT enough — different companies frequently
-            post identical titles ("Data Analyst").
+    Pass 1: deduplicate by URL (exact).
+    Pass 2: deduplicate by normalized title, keeping the best source
+            (linkedin > indeed > glassdoor > other).
     """
-    SOURCE_RANK = {"linkedin": 0, "indeed": 1, "glassdoor": 2,
-                   "zip_recruiter": 3, "google": 4, "builtin": 5, "wellfound": 6}
+    SOURCE_RANK = {"linkedin": 0, "indeed": 1, "glassdoor": 2, "builtin": 3, "wellfound": 4}
 
-    # Pass 1: URL dedup (empty URLs are not treated as duplicates of each other)
+    # Pass 1: URL dedup
     seen_urls: set[str] = set()
     url_unique: list[dict] = []
     for job in jobs:
         url = job.get("url", "").strip()
-        if not url:
-            url_unique.append(job)
-            continue
-        if url not in seen_urls:
-            seen_urls.add(url)
+        key = url or generate_job_id(job)
+        job.setdefault('id', generate_job_id(job))
+        if key not in seen_urls:
+            seen_urls.add(key)
             url_unique.append(job)
 
-    # Pass 2: (title, company) dedup — keep best-source version
-    title_map: dict[tuple[str, str], dict] = {}
-    keyless: list[dict] = []
+    # Pass 2: title dedup — keep best-source version per unique title
+    title_map: dict[str, dict] = {}
     for job in url_unique:
-        title_key = _normalize_title(job.get("title", ""))
-        company_key = _normalize_title(job.get("company", ""))
-        if not title_key:
-            keyless.append(job)
+        key = (_normalize_title(job.get("title", "")), job.get('company', '').strip().casefold(),
+               job.get('location', '').strip().casefold())
+        if not key:
             continue
-        key = (title_key, company_key)
         if key not in title_map:
             title_map[key] = job
         else:
@@ -62,37 +54,44 @@ def deduplicate_jobs(jobs: list[dict]) -> list[dict]:
             if new_rank < existing_rank:
                 title_map[key] = job
 
-    return list(title_map.values()) + keyless
+    return list(title_map.values())
 
 
-def load_seen_jobs(obsidian_path: str) -> set[str]:
-    """Load previously seen job IDs from all Obsidian tracker files."""
-    vault = Path(obsidian_path).expanduser()
-    if not vault.exists():
-        return set()
+def load_seen_jobs(obsidian_path: str | None = None, html_tracker: str | None = None) -> set[str]:
+    """Load previously seen job IDs from the HTML tracker and/or Obsidian markdown files."""
+    seen: set[str] = set()
 
-    tracker_files = list(vault.glob("Job Tracker*.md"))
-    if not tracker_files:
-        return set()
+    # Primary: read data-id attributes from HTML tracker
+    if html_tracker:
+        html_path = Path(html_tracker).expanduser()
+        if html_path.exists():
+            content = html_path.read_text(encoding="utf-8", errors="replace")
+            seen.update(re.findall(r'data-id="([^"]+)"', content))
 
-    seen = set()
-    for tracker_path in tracker_files:
-        with open(tracker_path) as f:
-            content = f.read()
-            for line in content.split("\n"):
-                if "|" not in line or line.startswith("|--"):
-                    continue
-                parts = [p.strip() for p in line.split("|")]
-                for part in parts:
-                    # New format: extract URL from [Apply](url) and hash it
-                    for url in re.findall(r'\[(?:Apply|Link)\]\(([^)]+)\)', part):
-                        seen.add(hashlib.md5(url.encode()).hexdigest()[:12])
+    # Legacy: read URLs from Obsidian markdown tracker files
+    if obsidian_path:
+        vault = Path(obsidian_path).expanduser()
+        if vault.exists():
+            for tracker_path in vault.glob("Job Tracker*.md"):
+                with open(tracker_path, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                    for line in content.split("\n"):
+                        if "|" not in line or line.startswith("|--"):
+                            continue
+                        for part in [p.strip() for p in line.split("|")]:
+                            for url in re.findall(r'\[(?:Apply|Link)\]\(([^)]+)\)', part):
+                                seen.add(hashlib.md5(url.encode()).hexdigest()[:12])
+
     return seen
 
 
-def filter_seen_jobs(jobs: list[dict], obsidian_path: str) -> list[dict]:
-    """Filter out jobs that have already been seen."""
-    seen_ids = load_seen_jobs(obsidian_path)
+def filter_seen_jobs(
+    jobs: list[dict],
+    obsidian_path: str | None = None,
+    html_tracker: str | None = None,
+) -> list[dict]:
+    """Filter out jobs already recorded in the HTML tracker or Obsidian files."""
+    seen_ids = load_seen_jobs(obsidian_path, html_tracker)
     original_count = len(jobs)
     filtered = [j for j in jobs if j.get("id") not in seen_ids]
     print(f"Filtered {original_count - len(filtered)} previously seen jobs")

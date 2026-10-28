@@ -27,24 +27,28 @@ def main():
     args = parser.parse_args()
 
     resume_path = args.resume
-    if not resume_path and args.config:
+    preferred_countries = []
+    cfg = {}
+    if args.config:
         config_path = Path(args.config).expanduser()
         if config_path.exists():
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8-sig") as f:
                 cfg = json.load(f)
-            resume_path = cfg.get("resume_path")
+            if not resume_path:
+                resume_path = cfg.get("resume_path")
+            preferred_countries = cfg.get("preferred_countries", [])
 
-    with open(Path(args.input).expanduser()) as f:
+    with open(Path(args.input).expanduser(), encoding="utf-8-sig") as f:
         jobs = json.load(f)
 
-    scored = score_jobs(jobs, resume_path=resume_path)
+    scored = score_jobs(jobs, resume_path=resume_path, preferred_countries=preferred_countries, profile=cfg.get('scoring'))
     print(f"Scored {len(scored)} jobs", file=sys.stderr)
 
     output = json.dumps(scored, indent=2, default=str)
 
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, "w") as f:
+        with open(args.output, "w", encoding="utf-8") as f:
             f.write(output)
         print(f"Saved to {args.output}", file=sys.stderr)
     else:

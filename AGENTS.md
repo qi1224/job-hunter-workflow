@@ -1,0 +1,1 @@
+Read SKILL.md before installing or running this workflow. Keep CVs, proposals, configurations, API keys and runtime outputs outside the repository. Preserve existing user settings. Run offline tests with the repository virtual environment after behavioral changes. Never execute live searches as part of tests.
